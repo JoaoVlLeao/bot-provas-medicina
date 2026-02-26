@@ -1,4 +1,4 @@
-// index.js - Bot Médico (Acesso Público)
+// index.js - Bot Médico (Acesso Público com Suporte a Imagens)
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -56,24 +56,31 @@ DIRETRIZES DE CONTEÚDO MÉDICO:
 
 const chatHistory = new Map(); 
 
-async function gerarRespostaGemini(userId, textoUsuario) {
+async function gerarRespostaGemini(userId, textoUsuario, imagemObj = null) {
     const model = genAI.getGenerativeModel({ model: MODEL_NAME });
     
     if (!chatHistory.has(userId)) {
         chatHistory.set(userId, [
             { role: "user", parts: [{ text: `Instruções do Sistema: ${PROMPT_MEDICINA}` }] },
-            { role: "model", parts: [{ text: "Compreendido. Aguardando a primeira dúvida médica ou questão." }] }
+            { role: "model", parts: [{ text: "Compreendido. Aguardando a primeira dúvida médica, questão ou imagem." }] }
         ]);
     }
 
     const historico = chatHistory.get(userId);
     const chat = model.startChat({ history: historico });
 
+    // Monta o array de envio suportando texto e imagem
+    let msgFormatada = [];
+    if (textoUsuario) msgFormatada.push(textoUsuario);
+    if (imagemObj) msgFormatada.push(imagemObj);
+
     try {
-        const result = await chat.sendMessage(textoUsuario);
+        const result = await chat.sendMessage(msgFormatada);
         const respostaText = result.response.text();
         
-        historico.push({ role: "user", parts: [{ text: textoUsuario }] });
+        // Salva no histórico apenas o texto para não estourar a memória com imagens base64
+        const textoHistorico = imagemObj ? `[Imagem enviada] ${textoUsuario}` : textoUsuario;
+        historico.push({ role: "user", parts: [{ text: textoHistorico }] });
         historico.push({ role: "model", parts: [{ text: respostaText }] });
         
         if (historico.length > 30) {
@@ -120,14 +127,37 @@ client.on('message_create', async (msg) => {
     // Ignora mensagens enviadas por você mesmo ou status
     if (msg.fromMe || msg.isStatus) return;
 
-    // A trava de segurança foi removida. Qualquer número que enviar mensagem será atendido.
-    console.log(`💬 Dúvida recebida de ${msg.from}! Processando...`);
+    let imagemObj = null;
+
+    // Verifica se a mensagem contém mídia (foto)
+    if (msg.hasMedia) {
+        const media = await msg.downloadMedia();
+        if (media && media.mimetype.startsWith('image/')) {
+            imagemObj = {
+                inlineData: {
+                    data: media.data,
+                    mimeType: media.mimetype
+                }
+            };
+        }
+    }
+
+    // Se a mensagem não tiver corpo de texto, mas tiver foto, criamos um prompt padrão
+    let texto = msg.body;
+    if (!texto && imagemObj) {
+        texto = "Analise esta imagem sob o ponto de vista médico (pode ser uma questão, um ECG, lesão, etc) e me dê as informações relevantes de forma resumida.";
+    }
+
+    // Se não for nem texto nem imagem que nos interessa, ignora
+    if (!texto && !imagemObj) return;
+
+    console.log(`💬 Dúvida/Imagem recebida de ${msg.from}! Processando...`);
 
     try {
         const chat = await msg.getChat();
         await chat.sendStateTyping(); 
         
-        const resposta = await gerarRespostaGemini(msg.from, msg.body);
+        const resposta = await gerarRespostaGemini(msg.from, texto, imagemObj);
         
         await msg.reply(resposta);
         await chat.clearState();
