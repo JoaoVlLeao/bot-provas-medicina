@@ -3,8 +3,7 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes,createHash,timingSafeEqual } from 'node:crypto';
-import wwebjs from 'whatsapp-web.js';
-import QRCode from 'qrcode';
+import { Telegram } from './lib/telegram.js';
 import { Ledger } from './lib/ledger.js';
 import { Drive } from './lib/drive.js';
 import { Worker,safeError } from './lib/worker.js';
@@ -17,8 +16,6 @@ fs.mkdirSync(dataDir,{recursive:true});
 const ledger=new Ledger(path.join(dataDir,'bot.sqlite'));
 const folderId=process.env.DRIVE_FOLDER_ID || '';
 if(folderId && !/^[\w-]+$/.test(folderId)) throw new Error('DRIVE_FOLDER_ID inválido.');
-const target=(process.env.TARGET_WHATSAPP_NUMBER || '').replace(/\D/g,'');
-if(target && !/^\d{10,15}$/.test(target)) throw new Error('Número de destino inválido.');
 const model=process.env.GEMINI_MODEL || 'gemini-2.5-pro';
 const credentialPath=path.join(dataDir,'google-service-account.json');
 const credentials=process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON) : fs.existsSync(credentialPath)?JSON.parse(fs.readFileSync(credentialPath,'utf8')):undefined;
@@ -26,31 +23,11 @@ let drive=new Drive({folderId,credentials,refreshToken:process.env.GOOGLE_REFRES
 const port=Number(process.env.PORT || 3050);
 const testMode=process.env.BOT_TEST_MODE==='true' && !process.env.RAILWAY_SERVICE_ID;
 const storageReady=!process.env.RAILWAY_SERVICE_ID || Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR);
-const status={whatsapp:'iniciando',qr:null,error:null,connectedNumber:null};
-let client,initializing=false,stopping=false,reconnectTimer;
-
-async function initializeWhatsApp() {
-  if(initializing || stopping || testMode || !storageReady || status.whatsapp==='conectado') return;
-  initializing=true;status.error=null;status.whatsapp='iniciando';status.qr=null;
-  try {
-    if(client) {await client.destroy().catch(()=>{});client.removeAllListeners();}
-    const sessionDir=path.join(dataDir,'whatsapp','session');
-    // Chromium leaves only these process locks after a container is replaced.
-    for(const name of ['SingletonLock','SingletonSocket','SingletonCookie']) fs.rmSync(path.join(sessionDir,name),{force:true});
-    client=new wwebjs.Client({authStrategy:new wwebjs.LocalAuth({dataPath:path.join(dataDir,'whatsapp')}),puppeteer:{headless:true,executablePath:process.env.PUPPETEER_EXECUTABLE_PATH || undefined,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']},qrMaxRetries:0});
-    client.on('qr',async qr=>{status.whatsapp='aguardando QR Code';status.connectedNumber=null;status.qr=await QRCode.toDataURL(qr,{width:320,margin:2});});
-    client.on('authenticated',()=>{status.whatsapp='autenticando';status.qr=null;});
-    client.on('ready',()=>{status.whatsapp='conectado';status.connectedNumber=client.info?.wid?.user || null;status.qr=null;status.error=null;console.log('WhatsApp conectado.');void worker.tick();});
-    client.on('auth_failure',()=>{status.whatsapp='falha de autenticação';status.qr=null;status.error='A conexão precisa ser refeita.';});
-    client.on('disconnected',()=>{status.whatsapp='desconectado';status.qr=null;clearTimeout(reconnectTimer);reconnectTimer=setTimeout(()=>void initializeWhatsApp(),15000);});
-    await client.initialize();
-  } catch(e) {status.whatsapp='erro ao iniciar';status.error=safeError(e);console.error('Não foi possível iniciar o WhatsApp:',safeError(e));}
-  finally {initializing=false;}
-}
-const worker=new Worker({ledger,drive,target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>status.whatsapp==='conectado' && Boolean(target) && !stopping,send:async(number,answer)=>{
-  const id=await client.getNumberId(number);if(!id) throw new Error('O número de destino não está disponível no WhatsApp.');
-  return client.sendMessage(id._serialized,answer,{sendSeen:false});
-}});
+const telegramPath=path.join(dataDir,'telegram.json');
+const telegramConfig=fs.existsSync(telegramPath)?JSON.parse(fs.readFileSync(telegramPath,'utf8')):{};
+let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger});
+let stopping=false,configuringTelegram=false;
+const worker=new Worker({ledger,drive,target:()=>telegram.target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>telegram.ready && storageReady && !stopping,send:(target,answer)=>telegram.send(target,answer)});
 
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
 app.use(express.urlencoded({extended:false,limit:'2kb'}));app.use(express.json({limit:'32kb'}));
@@ -74,8 +51,27 @@ app.post('/login',(req,res)=>{
 app.use((req,res,next)=>{if(!authenticated(req))return req.path.startsWith('/api/')?res.sendStatus(401):res.redirect('/login');if(req.method==='POST'&&!sameOrigin(req))return res.sendStatus(403);next();});
 app.get('/',(_req,res)=>res.type('html').send(panel));
 app.get('/panel.js',(_req,res)=>res.type('js').send(script));
-app.get('/api/status',(_req,res)=>res.json({whatsapp:status.whatsapp,hasQr:Boolean(status.qr),whatsappError:status.error,connectedNumber:status.connectedNumber,target,model,storageReady,driveConfigured:drive.configured,driveAccount:drive.email,driveFolder:folderId,driveError:worker.error,lastScan:worker.lastScan,initialized:ledger.get('initialized')||null,paused:ledger.get('paused')==='true',counts:ledger.counts(),recent:ledger.recent(),geminiConfigured:Boolean(process.env.GEMINI_API_KEY)}));
-app.get('/api/qr',(_req,res)=>{if(!status.qr)return res.sendStatus(404);res.type('png').send(Buffer.from(status.qr.split(',')[1],'base64'));});
+app.get('/api/status',(_req,res)=>res.json({channel:'telegram',telegram:telegram.publicStatus(),model,storageReady,driveConfigured:drive.configured,driveAccount:drive.email,driveFolder:folderId,driveError:worker.error,lastScan:worker.lastScan,initialized:ledger.get('initialized')||null,paused:ledger.get('paused')==='true',counts:ledger.counts(),recent:ledger.recent(),geminiConfigured:Boolean(process.env.GEMINI_API_KEY)}));
+app.post('/api/telegram-token',async(req,res)=>{
+  if(!storageReady) return res.status(409).json({error:'Configure primeiro o armazenamento persistente.'});
+  if(telegram.configured) return res.status(409).json({error:'Um bot já está configurado. Use a conexão existente.'});
+  if(configuringTelegram || worker.busy) return res.status(409).json({error:'Aguarde a verificação em andamento e tente novamente.'});
+  configuringTelegram=true;
+  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger});
+  try {
+    await candidate.validate();
+    await telegram.stop();
+    fs.writeFileSync(telegramPath+'.tmp',JSON.stringify({token:candidate.token}),{mode:0o600});fs.renameSync(telegramPath+'.tmp',telegramPath);
+    candidate.newPairing();telegram=candidate;
+    if(!testMode) telegram.start();
+    res.json({ok:true,telegram:telegram.publicStatus()});
+  } catch(e) {await candidate.stop();res.status(400).json({error:safeError(e)});}
+  finally {configuringTelegram=false;}
+});
+app.post('/api/telegram-pair',(_req,res)=>{
+  if(!telegram.bot || telegram.target) return res.status(409).json({error:'Verifique a configuração do Telegram.'});
+  telegram.newPairing();res.json({ok:true,telegram:telegram.publicStatus()});
+});
 app.post('/api/drive-credentials',async(req,res)=>{
   const supplied=req.body.credentials;
   if(!storageReady) return res.status(409).json({error:'Configure primeiro o armazenamento persistente.'});
@@ -92,11 +88,9 @@ app.post('/api/drive-credentials',async(req,res)=>{
   } catch(e) {res.status(400).json({error:safeError(e)});}
 });
 app.post('/api/pause',(req,res)=>{ledger.set('paused',req.body.paused===true?'true':'false');res.json({ok:true});});
-app.post('/api/reconnect',(_req,res)=>{if(!initializing && status.whatsapp!=='conectado')void initializeWhatsApp();res.json({ok:true});});
 app.use((err,_req,res,_next)=>{console.error(safeError(err));res.status(500).json({error:'Falha ao atender a solicitação.'});});
 const server=app.listen(port,'0.0.0.0',()=>{console.log(`Painel ativo na porta ${server.address().port}.`);console.log(`PANEL_ACCESS_CODE=${code}`);console.log('Código de acesso de uso único; expira em 30 minutos.');});
 const timer=setInterval(()=>void worker.tick(),Math.max(10000,Number(process.env.DRIVE_POLL_MS)||15000));
-if(!testMode){void worker.tick();void initializeWhatsApp();}
-else {status.whatsapp='modo de teste';}
-async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);clearTimeout(reconnectTimer);server.close();await client?.destroy().catch(()=>{});ledger.close();process.exit(0);}
+if(!testMode){void worker.tick();if(storageReady) telegram.start();}
+async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);server.close();await telegram.stop();ledger.close();process.exit(0);}
 process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());

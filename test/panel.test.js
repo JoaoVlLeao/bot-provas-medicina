@@ -4,15 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
-test('QR and status require login; setup code is one-time; commands reject cross-origin requests',async t=>{
+test('status and Telegram setup require login; setup code is one-time; commands reject cross-origin requests',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'medicine-panel-'));
- const proc=spawn(process.execPath,['index.js'],{cwd:new URL('../',import.meta.url),env:{...process.env,PORT:'0',DATA_DIR:dir,BOT_TEST_MODE:'true',RAILWAY_SERVICE_ID:'',GOOGLE_SERVICE_ACCOUNT_JSON:'',GOOGLE_REFRESH_TOKEN:'',DRIVE_FOLDER_ID:'',GEMINI_API_KEY:''},stdio:['ignore','pipe','pipe']});
+ const proc=spawn(process.execPath,['index.js'],{cwd:new URL('../',import.meta.url),env:{...process.env,PORT:'0',DATA_DIR:dir,BOT_TEST_MODE:'true',RAILWAY_SERVICE_ID:'',GOOGLE_SERVICE_ACCOUNT_JSON:'',GOOGLE_REFRESH_TOKEN:'',DRIVE_FOLDER_ID:'',GEMINI_API_KEY:'',TELEGRAM_BOT_TOKEN:''},stdio:['ignore','pipe','pipe']});
  t.after(async()=>{proc.kill('SIGTERM');await new Promise(resolve=>proc.once('exit',resolve));fs.rmSync(dir,{recursive:true,force:true});});
  const boot=await new Promise((resolve,reject)=>{let out='';const timeout=setTimeout(()=>reject(new Error('startup timeout')),10000);proc.stdout.on('data',c=>{out+=c;const port=out.match(/porta (\d+)/)?.[1];const code=out.match(/PANEL_ACCESS_CODE=([\w-]+)/)?.[1];if(port&&code){clearTimeout(timeout);resolve({port,code});}});proc.once('error',reject);});
  const base='http://127.0.0.1:'+boot.port;
  assert.equal((await fetch(base+'/health')).status,200);
  assert.equal((await fetch(base+'/login')).headers.get('referrer-policy'),'same-origin');
- assert.equal((await fetch(base+'/api/qr')).status,401);
+ assert.equal((await fetch(base+'/api/telegram-token',{method:'POST'})).status,401);
  assert.equal((await fetch(base+'/api/status')).status,401);
  const login=await fetch(base+'/login',{method:'POST',redirect:'manual',headers:{Origin:base,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code:boot.code})});
  assert.equal(login.status,302);const cookie=login.headers.get('set-cookie').split(';')[0];
@@ -24,4 +24,9 @@ test('QR and status require login; setup code is one-time; commands reject cross
  const state=await (await fetch(base+'/api/status',{headers:{Cookie:cookie}})).json();assert.equal(state.paused,true);assert.equal(state.driveConfigured,false);
  assert.equal((await fetch(base+'/api/drive-credentials',{method:'POST',headers:{Cookie:cookie,Origin:base,'Content-Type':'application/json'},body:'{"credentials":{"type":"invalid"}}'})).status,400);
  assert.equal(fs.existsSync(path.join(dir,'google-service-account.json')),false);
+ assert.equal(state.channel,'telegram');assert.equal(state.telegram.configured,false);
+ assert.equal((await fetch(base+'/api/telegram-token',{method:'POST',headers:{Cookie:cookie,Origin:base,'Content-Type':'application/json'},body:'{"token":"invalid"}'})).status,400);
+ assert.equal(fs.existsSync(path.join(dir,'telegram.json')),false);
+ assert.equal((await fetch(base+'/api/telegram-token',{method:'POST',headers:{Cookie:cookie,Origin:'https://untrusted.example','Content-Type':'application/json'},body:'{"token":"invalid"}'})).status,403);
+ assert.equal((await fetch(base+'/api/qr',{headers:{Cookie:cookie}})).status,404);
 });
