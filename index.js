@@ -54,7 +54,7 @@ const worker=new Worker({ledger,drive,target,analyze:createAnalyzer({apiKey:proc
 
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
 app.use(express.urlencoded({extended:false,limit:'2kb'}));app.use(express.json({limit:'32kb'}));
-app.use((req,res,next)=>{res.set({'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});next();});
+app.use((req,res,next)=>{res.set({'Cache-Control':'no-store','Referrer-Policy':'same-origin','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});next();});
 app.get('/health',(_req,res)=>res.status(storageReady?200:503).json({ok:storageReady}));
 app.get('/style.css',(_req,res)=>res.type('css').send(style));
 const code=randomBytes(24).toString('base64url');const codeExpiry=Date.now()+30*60000;let codeUsed=false;

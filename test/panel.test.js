@@ -11,6 +11,7 @@ test('QR and status require login; setup code is one-time; commands reject cross
  const boot=await new Promise((resolve,reject)=>{let out='';const timeout=setTimeout(()=>reject(new Error('startup timeout')),10000);proc.stdout.on('data',c=>{out+=c;const port=out.match(/porta (\d+)/)?.[1];const code=out.match(/PANEL_ACCESS_CODE=([\w-]+)/)?.[1];if(port&&code){clearTimeout(timeout);resolve({port,code});}});proc.once('error',reject);});
  const base='http://127.0.0.1:'+boot.port;
  assert.equal((await fetch(base+'/health')).status,200);
+ assert.equal((await fetch(base+'/login')).headers.get('referrer-policy'),'same-origin');
  assert.equal((await fetch(base+'/api/qr')).status,401);
  assert.equal((await fetch(base+'/api/status')).status,401);
  const login=await fetch(base+'/login',{method:'POST',redirect:'manual',headers:{Origin:base,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code:boot.code})});
