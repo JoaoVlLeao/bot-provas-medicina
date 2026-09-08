@@ -21,4 +21,6 @@ test('QR and status require login; setup code is one-time; commands reject cross
  assert.equal((await fetch(base+'/api/pause',{method:'POST',headers:{Origin:'https://untrusted.example',Cookie:cookie,'Content-Type':'application/json'},body:'{"paused":true}'})).status,403);
  assert.equal((await fetch(base+'/api/pause',{method:'POST',headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json'},body:'{"paused":true}'})).status,200);
  const state=await (await fetch(base+'/api/status',{headers:{Cookie:cookie}})).json();assert.equal(state.paused,true);assert.equal(state.driveConfigured,false);
+ assert.equal((await fetch(base+'/api/drive-credentials',{method:'POST',headers:{Cookie:cookie,Origin:base,'Content-Type':'application/json'},body:'{"credentials":{"type":"invalid"}}'})).status,400);
+ assert.equal(fs.existsSync(path.join(dir,'google-service-account.json')),false);
 });

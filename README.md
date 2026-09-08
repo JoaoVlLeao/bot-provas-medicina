@@ -8,7 +8,7 @@ Serviço contínuo para Railway. Monitora imagens PNG/JPEG/WebP de uma pasta pri
 - Anexe um volume Railway em `/data`. O aplicativo usa `RAILWAY_VOLUME_MOUNT_PATH` para banco SQLite, sessão de WhatsApp e sessões do painel.
 - Mantenha uma única réplica e Serverless desativado.
 - Configure o healthcheck em `/health` e o domínio na porta definida por `PORT`.
-- Variáveis: `GEMINI_API_KEY`, `GEMINI_MODEL`, `DRIVE_FOLDER_ID`, `TARGET_WHATSAPP_NUMBER` (DDI+DDD+número), `GOOGLE_SERVICE_ACCOUNT_JSON`. Alternativamente, autenticação Drive via `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`.
+- Variáveis: `GEMINI_API_KEY`, `GEMINI_MODEL`, `DRIVE_FOLDER_ID`, `TARGET_WHATSAPP_NUMBER` (DDI+DDD+número), `GOOGLE_SERVICE_ACCOUNT_JSON` (ou importe o JSON pelo painel autenticado; ele será salvo somente no volume privado). Alternativamente, autenticação Drive via `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`.
 - Ative a API do Google Drive no projeto Google e compartilhe **apenas a pasta de capturas**, como leitor, com a conta de serviço. Não conceda funções de administrador do projeto.
 - Não coloque chaves, números particulares ou configurações de conta no GitHub.
 
