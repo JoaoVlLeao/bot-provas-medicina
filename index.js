@@ -24,8 +24,10 @@ const port=Number(process.env.PORT || 3050);
 const testMode=process.env.BOT_TEST_MODE==='true' && !process.env.RAILWAY_SERVICE_ID;
 const storageReady=!process.env.RAILWAY_SERVICE_ID || Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR);
 const telegramPath=path.join(dataDir,'telegram.json');
+const expectedPhone=String(process.env.TARGET_TELEGRAM_NUMBER || process.env.TARGET_WHATSAPP_NUMBER || '').replace(/\D/g,'');
+if(expectedPhone && !/^\d{10,15}$/.test(expectedPhone)) throw new Error('Número de destino inválido.');
 const telegramConfig=fs.existsSync(telegramPath)?JSON.parse(fs.readFileSync(telegramPath,'utf8')):{};
-let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger});
+let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger,expectedPhone});
 let stopping=false,configuringTelegram=false;
 const worker=new Worker({ledger,drive,target:()=>telegram.target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>telegram.ready && storageReady && !stopping,send:(target,answer)=>telegram.send(target,answer)});
 
@@ -57,7 +59,7 @@ app.post('/api/telegram-token',async(req,res)=>{
   if(telegram.configured) return res.status(409).json({error:'Um bot já está configurado. Use a conexão existente.'});
   if(configuringTelegram || worker.busy) return res.status(409).json({error:'Aguarde a verificação em andamento e tente novamente.'});
   configuringTelegram=true;
-  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger});
+  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger,expectedPhone});
   try {
     await candidate.validate();
     await telegram.stop();

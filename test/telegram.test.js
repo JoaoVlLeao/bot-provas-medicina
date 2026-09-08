@@ -42,6 +42,19 @@ test('expired and rotated pairing links cannot bind a chat', async t => {
   f.telegram.newPairing(); assert.equal(f.telegram.handleUpdate(f.update(100, '/start ' + old)), null);
 });
 
+test('an expected phone requires the sender own contact and rejects the administrative account', async t => {
+  const f=fixture(t);f.telegram.expectedPhone='5511999999999';await f.telegram.validate();f.telegram.newPairing();
+  const nonce=f.ledger.get('telegram_pair');
+  assert.equal(f.telegram.handleUpdate(f.update(100,'/start '+nonce)).contact,true);assert.equal(f.telegram.target,'');
+  const u=f.update(100,'');u.message.contact={user_id:100,phone_number:'+5511888888888'};
+  assert.match(f.telegram.handleUpdate(u).text,/não é o destino/);assert.equal(f.telegram.target,'');
+  u.message.contact={user_id:200,phone_number:'+5511999999999'};
+  assert.equal(f.telegram.handleUpdate(u),null);assert.equal(f.telegram.target,'');
+  f.telegram.handleUpdate(f.update(200,'/start '+nonce));
+  const correct=f.update(200,'');correct.message.contact={user_id:200,phone_number:'+5511999999999'};
+  assert.match(f.telegram.handleUpdate(correct),/conectado/);assert.equal(f.telegram.target,'200');
+});
+
 test('long Unicode responses are delivered in order without truncation or broken characters', async t => {
   const f = fixture(t); await f.telegram.validate(); f.ledger.set('telegram_chat_id', '100');
   const answer = 'Análise 🩺 com acentuação.\n'.repeat(500);

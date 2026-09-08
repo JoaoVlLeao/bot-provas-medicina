@@ -16,7 +16,7 @@ Serviço contínuo no Railway. Monitora imagens PNG/JPEG/WebP de uma pasta priva
 1. Abra o domínio do serviço. O painel exige autenticação. A cada início, os logs privados do Railway recebem `PANEL_ACCESS_CODE`, código de uso único válido por 30 minutos. A sessão do painel dura 30 dias e usa cookie HttpOnly.
 2. Na sua conta do Telegram, crie um bot exclusivo com `/newbot` no BotFather oficial. Não precisa de um novo número de telefone.
 3. Cole o token no campo privado do painel. O serviço valida `getMe` e recusa um bot que já usa webhook em outro serviço.
-4. Abra o link de conexão gerado no painel e toque em Iniciar no Telegram. O link contém um segredo de uso único que expira em 30 minutos; `/start` sem esse segredo não vincula ninguém.
+4. Abra o link de conexão gerado no painel e toque em Iniciar no Telegram. O link contém um segredo de uso único que expira em 30 minutos; `/start` sem esse segredo não vincula ninguém. Quando `TARGET_TELEGRAM_NUMBER` estiver configurado, confirme seu próprio contato no botão do bot: o número e o ID do remetente precisam coincidir. Para a migração, a variável antiga `TARGET_WHATSAPP_NUMBER` funciona como valor de destino quando a nova não estiver definida.
 5. Confira o destinatário no painel e retome o monitor, se estiver pausado. Envie uma captura nova à pasta e confirme a resposta na conversa.
 
 A conta que abre esse link privado recebe as respostas. Grupos, outros contatos e tentativas de trocar o destinatário pelo chat são ignorados. Após a vinculação, `/start`, `/help` e `/status` respondem somente ao destinatário configurado. O Telegram Web pode ficar fechado.
