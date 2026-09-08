@@ -2,6 +2,8 @@
 
 Serviço contínuo no Railway. Monitora imagens PNG/JPEG/WebP de uma pasta privada do Google Drive, analisa com Gemini e envia a resposta à conversa privada configurada pela API oficial do Telegram.
 
+As respostas começam com `Resposta letra: A`, com apenas a letra em negrito no Telegram, seguidas de uma ou duas frases curtas (até 40 palavras e 400 caracteres). A saída estruturada do Gemini garante a posição da letra; imagens sem alternativa identificável recebem uma resposta curta sem inventar uma letra. O Gemini 2.5 Pro mantém raciocínio com orçamento de 2.048 tokens e limite total de saída de 3.072 tokens para reduzir demora e elaboração.
+
 ## Implantação
 
 - Node.js 24 é instalado pelo Dockerfile. Não há Chromium, WhatsApp Web ou automação de uma conta pessoal.

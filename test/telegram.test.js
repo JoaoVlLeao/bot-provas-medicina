@@ -67,6 +67,19 @@ test('long Unicode responses are delivered in order without truncation or broken
   assert.equal(splitMessage(' x ').join(''), ' x ');
 });
 
+test('only the answer letter is bold and explanation markup remains literal', async t => {
+  const f = fixture(t); await f.telegram.validate(); f.ledger.set('telegram_chat_id', '100');
+  const text = 'Resposta letra: A\n\nJustificativa curta com <, >, & e _texto_ 🩺.';
+  await f.telegram.send('100', text);
+  await f.telegram.send('100', 'Resposta:\n\nNão é possível ler as alternativas.');
+  const sent = f.calls.filter(c => c.method === 'sendMessage');
+  assert.equal(sent[0].body.text, text);
+  assert.deepEqual(sent[0].body.entities, [{type:'bold', offset:'Resposta letra: '.length, length:1}]);
+  assert.equal(text.slice(sent[0].body.entities[0].offset, sent[0].body.entities[0].offset+1), 'A');
+  assert.equal(sent[0].body.parse_mode, undefined);
+  assert.equal(sent[1].body.entities, undefined);
+});
+
 test('explicit rate limits wait and retry; ambiguous partial delivery is not replayed', async t => {
   const f = fixture(t); await f.telegram.validate(); f.ledger.set('telegram_chat_id', '100');
   const normal = f.telegram.fetchImpl; let calls = 0;
