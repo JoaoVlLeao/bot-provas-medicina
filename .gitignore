@@ -1,5 +1,5 @@
-node_modules
+node_modules/
+.data/
 .env
-.data
-bot_state.json
-wpp_store.json
+.env.*
+*.log

@@ -1,207 +1,86 @@
-// index.js - Bot Médico (Acesso Público com Suporte a Imagens)
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import 'dotenv/config';
+import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomBytes,createHash,timingSafeEqual } from 'node:crypto';
 import wwebjs from 'whatsapp-web.js';
-import qrcode from "qrcode"; 
+import QRCode from 'qrcode';
+import { Ledger } from './lib/ledger.js';
+import { Drive } from './lib/drive.js';
+import { Worker,safeError } from './lib/worker.js';
+import { createAnalyzer } from './lib/gemini.js';
+import { panel,login,script,style } from './lib/panel.js';
 
-const { Client, LocalAuth } = wwebjs;
+process.umask(0o077);
+const dataDir=path.resolve(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || '.data');
+fs.mkdirSync(dataDir,{recursive:true});
+const ledger=new Ledger(path.join(dataDir,'bot.sqlite'));
+const folderId=process.env.DRIVE_FOLDER_ID || '';
+if(folderId && !/^[\w-]+$/.test(folderId)) throw new Error('DRIVE_FOLDER_ID inválido.');
+const target=(process.env.TARGET_WHATSAPP_NUMBER || '').replace(/\D/g,'');
+if(target && !/^\d{10,15}$/.test(target)) throw new Error('Número de destino inválido.');
+const model=process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+const credentials=process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON) : undefined;
+const drive=new Drive({folderId,credentials,refreshToken:process.env.GOOGLE_REFRESH_TOKEN,clientId:process.env.GOOGLE_CLIENT_ID,clientSecret:process.env.GOOGLE_CLIENT_SECRET});
+const port=Number(process.env.PORT || 3050);
+const testMode=process.env.BOT_TEST_MODE==='true' && !process.env.RAILWAY_SERVICE_ID;
+const storageReady=!process.env.RAILWAY_SERVICE_ID || Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR);
+const status={whatsapp:'iniciando',qr:null,error:null,connectedNumber:null};
+let client,initializing=false,stopping=false,reconnectTimer;
 
-// ======================= PREVENÇÃO DE CRASH =======================
-process.on('uncaughtException', (err) => {
-    console.error('🔥 CRÍTICO: Erro não tratado (uncaughtException):', err);
-});
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('🔥 CRÍTICO: Rejeição de promessa não tratada:', reason);
-});
-
-// ======================= CONFIGURAÇÃO DE DIRETÓRIOS =====================
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, ".data"); 
-
-if (!fs.existsSync(DATA_DIR)) {
-    try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+async function initializeWhatsApp() {
+  if(initializing || stopping || testMode || !storageReady || status.whatsapp==='conectado') return;
+  initializing=true;status.error=null;status.whatsapp='iniciando';status.qr=null;
+  try {
+    if(client) {await client.destroy().catch(()=>{});client.removeAllListeners();}
+    const sessionDir=path.join(dataDir,'whatsapp','session');
+    // Chromium leaves only these process locks after a container is replaced.
+    for(const name of ['SingletonLock','SingletonSocket','SingletonCookie']) fs.rmSync(path.join(sessionDir,name),{force:true});
+    client=new wwebjs.Client({authStrategy:new wwebjs.LocalAuth({dataPath:path.join(dataDir,'whatsapp')}),puppeteer:{headless:true,executablePath:process.env.PUPPETEER_EXECUTABLE_PATH || undefined,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']},qrMaxRetries:0});
+    client.on('qr',async qr=>{status.whatsapp='aguardando QR Code';status.connectedNumber=null;status.qr=await QRCode.toDataURL(qr,{width:320,margin:2});});
+    client.on('authenticated',()=>{status.whatsapp='autenticando';status.qr=null;});
+    client.on('ready',()=>{status.whatsapp='conectado';status.connectedNumber=client.info?.wid?.user || null;status.qr=null;status.error=null;console.log('WhatsApp conectado.');void worker.tick();});
+    client.on('auth_failure',()=>{status.whatsapp='falha de autenticação';status.qr=null;status.error='A conexão precisa ser refeita.';});
+    client.on('disconnected',()=>{status.whatsapp='desconectado';status.qr=null;clearTimeout(reconnectTimer);reconnectTimer=setTimeout(()=>void initializeWhatsApp(),15000);});
+    await client.initialize();
+  } catch(e) {status.whatsapp='erro ao iniciar';status.error=safeError(e);console.error('Não foi possível iniciar o WhatsApp:',safeError(e));}
+  finally {initializing=false;}
 }
+const worker=new Worker({ledger,drive,target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>status.whatsapp==='conectado' && Boolean(target) && !stopping,send:async(number,answer)=>{
+  const id=await client.getNumberId(number);if(!id) throw new Error('O número de destino não está disponível no WhatsApp.');
+  return client.sendMessage(id._serialized,answer,{sendSeen:false});
+}});
 
-// ======================= GEMINI SETUP =======================
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const MODEL_NAME = "gemini-2.5-pro"; 
-
-const PROMPT_MEDICINA = `
-Você é um preceptor médico de altíssimo nível, especialista em Urgência, Emergência, Cirurgia e Terapia Intensiva.
-O usuário é um estudante ou médico buscando informações rápidas.
-
-OBJETIVO: Fornecer respostas precisas, diretas e otimizadas estritamente para leitura no WHATSAPP.
-
-🚨 REGRAS RÍGIDAS DE FORMATAÇÃO (LIMITAÇÕES DO WHATSAPP) 🚨
-1. PROIBIDO TABELAS E HTML: O WhatsApp NÃO suporta tabelas Markdown (| coluna |), cabeçalhos com hashtag (###), nem tags HTML como <br>. NUNCA os utilize.
-2. NEGRITO: Para destacar palavras, use apenas UM asterisco de cada lado. Exemplo: *Cardiomiopatia*. NUNCA use dois asteriscos (**).
-3. ITÁLICO: Use underline. Exemplo: _texto_.
-4. ESTRUTURAÇÃO SEM TABELAS: Se precisar comparar doenças (ex: tipos de cardiomiopatias), crie um bloco de texto para cada uma usando listas e emojis, NUNCA desenhe uma tabela.
-5. TÍTULOS: Como não há tags de cabeçalho, faça títulos usando letras maiúsculas, emojis e negrito. Exemplo: 🫀 *CLASSIFICAÇÃO DAS CARDIOMIOPATIAS PRIMÁRIAS*
-6. QUEBRAS DE LINHA: Use a quebra de linha normal (pular linha), nunca escreva <br>.
-
-DIRETRIZES DE CONTEÚDO MÉDICO:
-1. VÁ DIRETO AO PONTO: Zero enrolação. Sem "Olá", sem introduções.
-2. SCANNEABILIDADE: O usuário está num plantão ou fazendo prova. Use tópicos curtos (com o símbolo • ou -). 
-3. CONDUTAS E ALGORITMOS: Use fluxogramas em texto claro. Exemplo: *Passo 1* ➔ *Passo 2* ➔ *Passo 3*.
-4. QUESTÕES DE PROVA: Dê o GABARITO imediatamente na primeira linha. Em seguida, justifique rapidamente porque a certa é a certa, e o erro das outras.
-5. MNEMÔNICOS: Sempre que existir um mnemônico clássico, destaque-o no final com o emoji 🧠.
-`;
-
-const chatHistory = new Map(); 
-
-async function gerarRespostaGemini(userId, textoUsuario, imagemObj = null) {
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
-    
-    if (!chatHistory.has(userId)) {
-        chatHistory.set(userId, [
-            { role: "user", parts: [{ text: `Instruções do Sistema: ${PROMPT_MEDICINA}` }] },
-            { role: "model", parts: [{ text: "Compreendido. Aguardando a primeira dúvida médica, questão ou imagem." }] }
-        ]);
-    }
-
-    const historico = chatHistory.get(userId);
-    const chat = model.startChat({ history: historico });
-
-    // Monta o array de envio suportando texto e imagem
-    let msgFormatada = [];
-    if (textoUsuario) msgFormatada.push(textoUsuario);
-    if (imagemObj) msgFormatada.push(imagemObj);
-
-    try {
-        const result = await chat.sendMessage(msgFormatada);
-        const respostaText = result.response.text();
-        
-        // Salva no histórico apenas o texto para não estourar a memória com imagens base64
-        const textoHistorico = imagemObj ? `[Imagem enviada] ${textoUsuario}` : textoUsuario;
-        historico.push({ role: "user", parts: [{ text: textoHistorico }] });
-        historico.push({ role: "model", parts: [{ text: respostaText }] });
-        
-        if (historico.length > 30) {
-            historico.splice(2, 2); 
-        }
-
-        return respostaText;
-    } catch (error) {
-        console.error(`⚠️ Erro Gemini: ${error.message}`);
-        return "⚠️ Erro ao processar com a IA. Tente novamente em alguns instantes.";
-    }
-}
-
-// ======================= CLIENTE WHATSAPP =======================
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: DATA_DIR }),
-    puppeteer: {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
+const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
+app.use(express.urlencoded({extended:false,limit:'2kb'}));app.use(express.json({limit:'2kb'}));
+app.use((req,res,next)=>{res.set({'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});next();});
+app.get('/health',(_req,res)=>res.status(storageReady?200:503).json({ok:storageReady}));
+app.get('/style.css',(_req,res)=>res.type('css').send(style));
+const code=randomBytes(24).toString('base64url');const codeExpiry=Date.now()+30*60000;let codeUsed=false;
+const sha=value=>createHash('sha256').update(value).digest('hex');
+let failures=[];
+function authenticated(req) {const token=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('bot_session='))?.slice(12);return Boolean(token && ledger.db.prepare('SELECT hash FROM sessions WHERE hash=? AND expires>?').get(sha(token),Date.now()));}
+function sameOrigin(req) {return req.get('origin')===`${req.protocol}://${req.get('host')}`;}
+app.get('/login',(_req,res)=>res.type('html').send(login));
+app.post('/login',(req,res)=>{
+  if(!sameOrigin(req)) return res.sendStatus(403);
+  failures=failures.filter(t=>Date.now()-t<60000);if(failures.length>=10) return res.status(429).send('Aguarde um minuto antes de tentar novamente.');
+  const supplied=Buffer.from(sha(String(req.body.code||'')));const expected=Buffer.from(sha(code));
+  if(codeUsed || Date.now()>codeExpiry || !timingSafeEqual(supplied,expected)) {failures.push(Date.now());return res.status(401).send('Código inválido ou expirado.');}
+  const token=randomBytes(32).toString('base64url');ledger.db.prepare('INSERT INTO sessions VALUES (?,?)').run(sha(token),Date.now()+30*86400000);codeUsed=true;
+  res.cookie('bot_session',token,{httpOnly:true,secure:req.secure,sameSite:'strict',maxAge:30*86400000,path:'/'});res.redirect('/');
 });
-
-let latestQrCode = null; 
-
-client.on('qr', (qr) => {
-    console.log('QR RECEIVED - Escaneie via Web');
-    qrcode.toDataURL(qr, (err, url) => {
-        if (!err) latestQrCode = url; 
-    });
-});
-
-client.on('ready', () => {
-    console.log('✅ Bot Médico Online e aberto ao público!');
-    latestQrCode = "CONNECTED"; 
-});
-
-client.on('disconnected', (reason) => {
-    console.log('❌ Cliente desconectado! Tentando reconectar...', reason);
-    latestQrCode = null;
-    client.initialize();
-});
-
-client.on('message_create', async (msg) => {
-    // Ignora mensagens enviadas por você mesmo ou status
-    if (msg.fromMe || msg.isStatus) return;
-
-    let imagemObj = null;
-
-    // Verifica se a mensagem contém mídia (foto)
-    if (msg.hasMedia) {
-        const media = await msg.downloadMedia();
-        if (media && media.mimetype.startsWith('image/')) {
-            imagemObj = {
-                inlineData: {
-                    data: media.data,
-                    mimeType: media.mimetype
-                }
-            };
-        }
-    }
-
-    // Se a mensagem não tiver corpo de texto, mas tiver foto, criamos um prompt padrão
-    let texto = msg.body;
-    if (!texto && imagemObj) {
-        texto = "Analise esta imagem sob o ponto de vista médico (pode ser uma questão, um ECG, lesão, etc) e me dê as informações relevantes de forma resumida.";
-    }
-
-    // Se não for nem texto nem imagem que nos interessa, ignora
-    if (!texto && !imagemObj) return;
-
-    console.log(`💬 Dúvida/Imagem recebida de ${msg.from}! Processando...`);
-
-    try {
-        const chat = await msg.getChat();
-        await chat.sendStateTyping(); 
-        
-        const resposta = await gerarRespostaGemini(msg.from, texto, imagemObj);
-        
-        await msg.reply(resposta);
-        await chat.clearState();
-    } catch (e) {
-        console.error("Erro ao responder:", e);
-    }
-});
-
-client.initialize();
-
-// ======================= SERVER (QR CODE WEB) =======================
-const app = express();
-app.use(cors());
-
-app.get('/', (req, res) => {
-    const metaRefresh = '<meta http-equiv="refresh" content="3">';
-    const style = '<style>body{font-family:sans-serif;text-align:center;padding-top:50px;background-color:#f0f4f8;}</style>';
-
-    if (latestQrCode === "CONNECTED") {
-        res.send(`
-            <html><head>${style}</head>
-            <body>
-                <h1 style="color: #2c3e50;">⚕️ Bot Médico Online!</h1>
-                <p>O sistema está conectado ao seu WhatsApp.</p>
-            </body></html>
-        `);
-    } else if (latestQrCode) {
-        res.send(`
-            <html><head>${metaRefresh}${style}</head>
-            <body>
-                <h1 style="color: #2c3e50;">Conecte o Bot Médico</h1>
-                <p>Escaneie o QR Code abaixo:</p>
-                <img src="${latestQrCode}" width="300" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);"/>
-            </body></html>
-        `);
-    } else {
-        res.send(`
-            <html><head>${metaRefresh}${style}</head>
-            <body>
-                <h1>Aguardando QR Code...</h1>
-            </body></html>
-        `);
-    }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`👂 Servidor rodando na porta ${PORT}`));
+app.use((req,res,next)=>{if(!authenticated(req))return req.path.startsWith('/api/')?res.sendStatus(401):res.redirect('/login');if(req.method==='POST'&&!sameOrigin(req))return res.sendStatus(403);next();});
+app.get('/',(_req,res)=>res.type('html').send(panel));
+app.get('/panel.js',(_req,res)=>res.type('js').send(script));
+app.get('/api/status',(_req,res)=>res.json({whatsapp:status.whatsapp,hasQr:Boolean(status.qr),whatsappError:status.error,connectedNumber:status.connectedNumber,target,model,storageReady,driveConfigured:drive.configured,driveAccount:drive.email,driveFolder:folderId,driveError:worker.error,lastScan:worker.lastScan,initialized:ledger.get('initialized')||null,paused:ledger.get('paused')==='true',counts:ledger.counts(),recent:ledger.recent(),geminiConfigured:Boolean(process.env.GEMINI_API_KEY)}));
+app.get('/api/qr',(_req,res)=>{if(!status.qr)return res.sendStatus(404);res.type('png').send(Buffer.from(status.qr.split(',')[1],'base64'));});
+app.post('/api/pause',(req,res)=>{ledger.set('paused',req.body.paused===true?'true':'false');res.json({ok:true});});
+app.post('/api/reconnect',(_req,res)=>{if(!initializing && status.whatsapp!=='conectado')void initializeWhatsApp();res.json({ok:true});});
+app.use((err,_req,res,_next)=>{console.error(safeError(err));res.status(500).json({error:'Falha ao atender a solicitação.'});});
+const server=app.listen(port,'0.0.0.0',()=>{console.log(`Painel ativo na porta ${server.address().port}.`);console.log(`PANEL_ACCESS_CODE=${code}`);console.log('Código de acesso de uso único; expira em 30 minutos.');});
+const timer=setInterval(()=>void worker.tick(),Math.max(10000,Number(process.env.DRIVE_POLL_MS)||15000));
+if(!testMode){void worker.tick();void initializeWhatsApp();}
+else {status.whatsapp='modo de teste';}
+async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);clearTimeout(reconnectTimer);server.close();await client?.destroy().catch(()=>{});ledger.close();process.exit(0);}
+process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());
