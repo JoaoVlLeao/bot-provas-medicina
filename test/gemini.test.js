@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAnalyzer } from '../lib/gemini.js';
+import { createAnalyzer,createStudyTutor } from '../lib/gemini.js';
 
 function analyzer(answer, {finishReason='STOP', thoughts=false, inspect=()=>{}}={}) {
   return createAnalyzer({apiKey:'test-key', fetchImpl:async (url, options)=>{
@@ -32,4 +32,18 @@ test('invalid, incomplete or oversized model output is not sent as an answer', a
     await assert.rejects(analyzer(value)(Buffer.from('image'), 'image/png'), /resposta/);
   }
   await assert.rejects(analyzer({letra:'A', explicacao:'Motivo.'}, {finishReason:'MAX_TOKENS'})(Buffer.from('image'), 'image/png'), /completa/);
+});
+
+test('a word or phrase uses the text study mode with the same Gemini model, separate from image answers',async()=>{
+  const seen=[];
+  const tutor=createStudyTutor({apiKey:'test',fetchImpl:async(url,options)=>{
+    const body=JSON.parse(options.body);seen.push(body);
+    assert.match(url,/gemini-2\.5-pro:generateContent$/);
+    assert.equal(body.generationConfig.responseSchema,undefined);
+    assert.equal(body.contents[0].parts.length,1);
+    return {ok:true,json:async()=>({candidates:[{finishReason:'STOP',content:{parts:[{text:'Conceito.\n* **Pista decisiva.**\n• Diferencial.'}]}}]})};
+  }});
+  for(const topic of ['SIRS','Diferença entre asma e DPOC']) assert.equal(await tutor(topic),'Conceito.\n• Pista decisiva.\n• Diferencial.');
+  assert.deepEqual(seen.map(body=>body.contents[0].parts[0].text),['SIRS','Diferença entre asma e DPOC']);
+  await assert.rejects(tutor(''),/Envie/);await assert.rejects(tutor('x'.repeat(4097)),/4096/);
 });

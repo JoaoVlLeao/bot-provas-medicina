@@ -80,6 +80,33 @@ test('only the answer letter is bold and explanation markup remains literal', as
   assert.equal(sent[1].body.entities, undefined);
 });
 
+test('study replies reference the incoming message without altering screenshot formatting',async t=>{
+  const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
+  await f.telegram.send('100','Conceito.\n• Pista.',{replyTo:123});
+  assert.deepEqual(f.calls.find(c=>c.method==='sendMessage').body.reply_parameters,{message_id:123,allow_sending_without_reply:true});
+});
+
+test('only plain text from the bound private recipient reaches the study handler',async t=>{
+  const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');const received=[];f.telegram.onText=message=>received.push(message);
+  for(const update of [f.update(200,'SIRS'),f.update(100,'SIRS','group'),f.update(100,'/status'),f.update(100,'/unknown'),f.update(100,'  ')]) f.telegram.handleUpdate(update);
+  assert.equal(received.length,0);
+  const update=f.update(100,'  SIRS  ');update.message.message_id=25;
+  assert.equal(f.telegram.handleUpdate(update),null);
+  assert.deepEqual(received,[{updateId:10,chatId:'100',messageId:25,text:'SIRS'}]);
+});
+
+test('incoming study text is committed before acknowledging its Telegram offset',async t=>{
+  const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
+  const update=f.update(100,'SIRS');update.message.message_id=25;let persisted=false,polls=0;
+  f.telegram.onText=()=>{assert.equal(f.ledger.get('telegram_offset'),undefined);persisted=true;};
+  f.telegram.fetchImpl=async()=>{
+    if(++polls===1)return {ok:true,json:async()=>({ok:true,result:[update]})};
+    assert.equal(persisted,true);assert.equal(f.ledger.get('telegram_offset'),'11');
+    f.telegram.controller.abort();throw new Error('stopped');
+  };
+  f.telegram.start();await f.telegram.task;
+});
+
 test('explicit rate limits wait and retry; ambiguous partial delivery is not replayed', async t => {
   const f = fixture(t); await f.telegram.validate(); f.ledger.set('telegram_chat_id', '100');
   const normal = f.telegram.fetchImpl; let calls = 0;

@@ -4,6 +4,12 @@ Serviço contínuo no Railway. Monitora imagens PNG/JPEG/WebP de uma pasta priva
 
 As respostas começam com `Resposta letra: A`, com apenas a letra em negrito no Telegram, seguidas de uma ou duas frases curtas (até 40 palavras e 400 caracteres). A saída estruturada do Gemini garante a posição da letra; imagens sem alternativa identificável recebem uma resposta curta sem inventar uma letra. O Gemini 2.5 Pro mantém raciocínio com orçamento de 2.048 tokens e limite total de saída de 3.072 tokens para reduzir demora e elaboração.
 
+## Estudo por mensagem
+
+Na conversa privada vinculada, envie uma palavra, sigla, frase ou dúvida de medicina, sem comando. O mesmo Gemini responde com o conceito e de 3 a 5 tópicos úteis para questões: pistas do enunciado, mecanismo, diferenciais e pegadinhas. A instrução limita a explicação a 220 palavras e 2.600 caracteres. Não é necessário enviar a questão completa, e o bot não inventa uma letra nem um enunciado.
+
+As mensagens recebidas são salvas no SQLite antes de avançar o offset do Telegram. A fila de estudo funciona também com o monitor do Drive pausado, processa um tema por vez e responde à mensagem original. Só aceita texto do destinatário privado já confirmado; grupos e outros remetentes continuam ignorados. A atividade aparece em Estudo por mensagem no painel. Até três tentativas de IA são feitas com espera crescente; envios de resultado incerto ficam para conferência e não são repetidos automaticamente. Não há novo pedido de conexão ou mudança de credenciais.
+
 ## Implantação
 
 - Node.js 24 é instalado pelo Dockerfile. Não há Chromium, WhatsApp Web ou automação de uma conta pessoal.

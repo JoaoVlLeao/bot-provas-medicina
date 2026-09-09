@@ -7,7 +7,8 @@ import { Telegram } from './lib/telegram.js';
 import { Ledger } from './lib/ledger.js';
 import { Drive } from './lib/drive.js';
 import { Worker,safeError } from './lib/worker.js';
-import { createAnalyzer } from './lib/gemini.js';
+import { createAnalyzer,createStudyTutor } from './lib/gemini.js';
+import { StudyWorker } from './lib/study.js';
 import { panel,login,script,style } from './lib/panel.js';
 
 process.umask(0o077);
@@ -29,6 +30,9 @@ if(expectedPhone && !/^\d{10,15}$/.test(expectedPhone)) throw new Error('Número
 const telegramConfig=fs.existsSync(telegramPath)?JSON.parse(fs.readFileSync(telegramPath,'utf8')):{};
 let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger,expectedPhone});
 let stopping=false,configuringTelegram=false;
+const study=new StudyWorker({ledger,answer:createStudyTutor({apiKey:process.env.GEMINI_API_KEY,model}),send:(...args)=>telegram.send(...args),target:()=>telegram.target,isReady:()=>telegram.ready && storageReady && !stopping});
+const receiveText=message=>{study.enqueue(message);};
+telegram.onText=receiveText;
 const worker=new Worker({ledger,drive,target:()=>telegram.target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>telegram.ready && storageReady && !stopping,send:(target,answer)=>telegram.send(target,answer)});
 
 const app=express();app.disable('x-powered-by');app.set('trust proxy',1);
@@ -53,13 +57,13 @@ app.post('/login',(req,res)=>{
 app.use((req,res,next)=>{if(!authenticated(req))return req.path.startsWith('/api/')?res.sendStatus(401):res.redirect('/login');if(req.method==='POST'&&!sameOrigin(req))return res.sendStatus(403);next();});
 app.get('/',(_req,res)=>res.type('html').send(panel));
 app.get('/panel.js',(_req,res)=>res.type('js').send(script));
-app.get('/api/status',(_req,res)=>res.json({channel:'telegram',telegram:telegram.publicStatus(),model,storageReady,driveConfigured:drive.configured,driveAccount:drive.email,driveFolder:folderId,driveError:worker.error,lastScan:worker.lastScan,initialized:ledger.get('initialized')||null,paused:ledger.get('paused')==='true',counts:ledger.counts(),recent:ledger.recent(),geminiConfigured:Boolean(process.env.GEMINI_API_KEY)}));
+app.get('/api/status',(_req,res)=>res.json({channel:'telegram',telegram:telegram.publicStatus(),study:study.status(),model,storageReady,driveConfigured:drive.configured,driveAccount:drive.email,driveFolder:folderId,driveError:worker.error,lastScan:worker.lastScan,initialized:ledger.get('initialized')||null,paused:ledger.get('paused')==='true',counts:ledger.counts(),recent:ledger.recent(),geminiConfigured:Boolean(process.env.GEMINI_API_KEY)}));
 app.post('/api/telegram-token',async(req,res)=>{
   if(!storageReady) return res.status(409).json({error:'Configure primeiro o armazenamento persistente.'});
   if(telegram.configured) return res.status(409).json({error:'Um bot já está configurado. Use a conexão existente.'});
   if(configuringTelegram || worker.busy) return res.status(409).json({error:'Aguarde a verificação em andamento e tente novamente.'});
   configuringTelegram=true;
-  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger,expectedPhone});
+  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger,expectedPhone,onText:receiveText});
   try {
     await candidate.validate();
     await telegram.stop();
@@ -93,6 +97,7 @@ app.post('/api/pause',(req,res)=>{ledger.set('paused',req.body.paused===true?'tr
 app.use((err,_req,res,_next)=>{console.error(safeError(err));res.status(500).json({error:'Falha ao atender a solicitação.'});});
 const server=app.listen(port,'0.0.0.0',()=>{console.log(`Painel ativo na porta ${server.address().port}.`);console.log(`PANEL_ACCESS_CODE=${code}`);console.log('Código de acesso de uso único; expira em 30 minutos.');});
 const timer=setInterval(()=>void worker.tick(),Math.max(10000,Number(process.env.DRIVE_POLL_MS)||15000));
+const studyTimer=testMode?null:setInterval(()=>void study.tick(),1000);
 if(!testMode){void worker.tick();if(storageReady) telegram.start();}
-async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);server.close();await telegram.stop();ledger.close();process.exit(0);}
+async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);clearInterval(studyTimer);server.close();await telegram.stop();await study.task;ledger.close();process.exit(0);}
 process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());
