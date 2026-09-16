@@ -30,7 +30,7 @@ if(expectedPhone && !/^\d{10,15}$/.test(expectedPhone)) throw new Error('Número
 const telegramConfig=fs.existsSync(telegramPath)?JSON.parse(fs.readFileSync(telegramPath,'utf8')):{};
 let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger,expectedPhone});
 let stopping=false,configuringTelegram=false;
-const study=new StudyWorker({ledger,answer:createStudyTutor({apiKey:process.env.GEMINI_API_KEY,model}),send:(...args)=>telegram.send(...args),target:()=>telegram.target,isReady:()=>telegram.ready && storageReady && !stopping});
+const study=new StudyWorker({ledger,answer:createStudyTutor({apiKey:process.env.GEMINI_API_KEY,model}),send:(...args)=>telegram.sendStudy(...args),canReply:chat=>telegram.canStudy(chat),isReady:()=>telegram.connected && storageReady && !stopping});
 const receiveText=message=>{study.enqueue(message);};
 telegram.onText=receiveText;
 const worker=new Worker({ledger,drive,target:()=>telegram.target,analyze:createAnalyzer({apiKey:process.env.GEMINI_API_KEY,model}),isReady:()=>telegram.ready && storageReady && !stopping,send:(target,answer)=>telegram.send(target,answer)});

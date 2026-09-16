@@ -6,9 +6,9 @@ As respostas começam com `Resposta letra: A`, com apenas a letra em negrito no 
 
 ## Estudo por mensagem
 
-Na conversa privada vinculada, envie uma palavra, sigla, frase ou dúvida de medicina, sem comando. O mesmo Gemini responde com o conceito e de 3 a 5 tópicos úteis para questões: pistas do enunciado, mecanismo, diferenciais e pegadinhas. A instrução limita a explicação a 220 palavras e 2.600 caracteres. Não é necessário enviar a questão completa, e o bot não inventa uma letra nem um enunciado.
+Qualquer pessoa pode abrir a conversa privada com o bot e enviar uma palavra, sigla, frase ou dúvida de medicina, sem cadastro ou confirmação de telefone. O mesmo Gemini responde com o conceito e de 3 a 5 tópicos úteis para questões: pistas do enunciado, mecanismo, diferenciais e pegadinhas. A instrução limita a explicação a 220 palavras e 2.600 caracteres. Não é necessário enviar a questão completa, e o bot não inventa uma letra nem um enunciado.
 
-As mensagens recebidas são salvas no SQLite antes de avançar o offset do Telegram. A fila de estudo funciona também com o monitor do Drive pausado, processa um tema por vez e responde à mensagem original. Só aceita texto do destinatário privado já confirmado; grupos e outros remetentes continuam ignorados. A atividade aparece em Estudo por mensagem no painel. Até três tentativas de IA são feitas com espera crescente; envios de resultado incerto ficam para conferência e não são repetidos automaticamente. Não há novo pedido de conexão ou mudança de credenciais.
+As mensagens recebidas são salvas no SQLite antes de avançar o offset do Telegram. A fila de estudo funciona também com o monitor do Drive pausado ou sem destinatário de prints, processa um tema por vez e responde à mensagem original na conversa de quem enviou. O acesso usa o ID da conversa privada fornecido pelo Telegram, independentemente do país ou formato do telefone. Grupos e mensagens de outros bots são ignorados. As conversas reconhecidas persistem no banco; nenhum usuário recebe respostas de outro ou os prints privados do Drive. A atividade aparece em Estudo por mensagem no painel. Até três tentativas de IA são feitas com espera crescente; envios de resultado incerto ficam para conferência e não são repetidos automaticamente.
 
 ## Implantação
 
@@ -27,7 +27,7 @@ As mensagens recebidas são salvas no SQLite antes de avançar o offset do Teleg
 4. Abra o link de conexão gerado no painel e toque em Iniciar no Telegram. O link contém um segredo de uso único que expira em 30 minutos; `/start` sem esse segredo não vincula ninguém. Quando `TARGET_TELEGRAM_NUMBER` estiver configurado, confirme seu próprio contato no botão do bot: o número e o ID do remetente precisam coincidir. Para a migração, a variável antiga `TARGET_WHATSAPP_NUMBER` funciona como valor de destino quando a nova não estiver definida.
 5. Confira o destinatário no painel e retome o monitor, se estiver pausado. Envie uma captura nova à pasta e confirme a resposta na conversa.
 
-A conta que abre esse link privado recebe as respostas. Grupos, outros contatos e tentativas de trocar o destinatário pelo chat são ignorados. Após a vinculação, `/start`, `/help` e `/status` respondem somente ao destinatário configurado. O Telegram Web pode ficar fechado.
+A conta vinculada por esse link recebe exclusivamente os prints do Drive. Essa vinculação não restringe o estudo por texto: `/start`, `/help`, `/status` e dúvidas médicas funcionam para todos nas respectivas conversas privadas. Os demais usuários não podem trocar o destinatário dos prints nem acessar seu histórico ou o painel administrativo. O Telegram Web pode ficar fechado.
 
 O bot usa long polling oficial, com offset persistente. O token não é retornado pelo painel nem registrado em logs. Respostas longas são divididas, preservando caracteres Unicode e respeitando o intervalo por conversa. Somente rejeições explícitas por limite de envio são repetidas automaticamente.
 

@@ -10,7 +10,7 @@ const message=(id,text='Choque neurogênico')=>({updateId:id,chatId:'100',messag
 function fixture(t) {
   const ledger=new Ledger(':memory:');t.after(()=>ledger.close());
   const sends=[],topics=[];let ready=true;
-  const worker=new StudyWorker({ledger,target:()=> '100',isReady:()=>ready,answer:async topic=>{topics.push(topic);return 'Explicação de '+topic;},send:async(...args)=>{sends.push(args);return {id:'sent-'+sends.length};}});
+  const worker=new StudyWorker({ledger,canReply:chat=>chat==='100',isReady:()=>ready,answer:async topic=>{topics.push(topic);return 'Explicação de '+topic;},send:async(...args)=>{sends.push(args);return {id:'sent-'+sends.length};}});
   return {ledger,worker,sends,topics,setReady:value=>{ready=value;}};
 }
 
@@ -42,10 +42,10 @@ test('model failure backs off while ambiguous delivery never replays',async t=>{
 test('restart recovers queued study requests and quarantines interrupted sends without changing print history',()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'study-restart-')),file=path.join(dir,'db.sqlite');
   try {
-    let ledger=new Ledger(file);let worker=new StudyWorker({ledger,target:()=> '100'});
+    let ledger=new Ledger(file);let worker=new StudyWorker({ledger,canReply:chat=>chat==='100'});
     ledger.discover([]);ledger.discover([{id:'print',name:'print.png',mimeType:'image/png'}]);ledger.update('print',{status:'sent'});
     worker.enqueue(message(1));worker.enqueue(message(2));worker.update(1,{status:'analyzing'});worker.update(2,{status:'sending'});ledger.close();
-    ledger=new Ledger(file);worker=new StudyWorker({ledger,target:()=> '100'});
+    ledger=new Ledger(file);worker=new StudyWorker({ledger,canReply:chat=>chat==='100'});
     assert.deepEqual(worker.status().counts,{queued:1,uncertain:1});assert.equal(ledger.counts().sent,1);ledger.close();
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });

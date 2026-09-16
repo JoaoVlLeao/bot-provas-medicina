@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Ledger } from '../lib/ledger.js';
 import { Telegram, splitMessage } from '../lib/telegram.js';
 import { safeError } from '../lib/worker.js';
+import { StudyWorker } from '../lib/study.js';
 
 function fixture(t) {
   const ledger = new Ledger(':memory:'); t.after(() => ledger.close());
@@ -25,11 +26,13 @@ test('only a private start with the current secret binds one recipient', async t
   const f = fixture(t); await f.telegram.validate(); f.telegram.newPairing();
   const nonce = f.ledger.get('telegram_pair');
   for (const update of [f.update(100, '/start'), f.update(100, '/start ' + 'Z'.repeat(32)), f.update(100, '/start ' + nonce, 'group')]) {
-    assert.equal(f.telegram.handleUpdate(update), null); assert.equal(f.telegram.target, '');
+    const reply=f.telegram.handleUpdate(update);
+    if(update.message.chat.type==='private') assert.equal(reply.study,true);else assert.equal(reply,null);
+    assert.equal(f.telegram.target, '');
   }
   assert.match(f.telegram.handleUpdate(f.update(100, '/start ' + nonce)), /conectado/);
   assert.equal(f.telegram.target, '100'); assert.equal(f.telegram.pairingLink(), null);
-  assert.equal(f.telegram.handleUpdate(f.update(200, '/start ' + nonce)), null);
+  assert.equal(f.telegram.handleUpdate(f.update(200, '/start ' + nonce)).study, true);
   assert.equal(f.telegram.target, '100');
   await assert.rejects(f.telegram.send('200', 'Resposta privada'), /não autorizada/);
   assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 0);
@@ -38,8 +41,8 @@ test('only a private start with the current secret binds one recipient', async t
 test('expired and rotated pairing links cannot bind a chat', async t => {
   const f = fixture(t); await f.telegram.validate(); f.telegram.newPairing();
   const old = f.ledger.get('telegram_pair'); f.advance(31 * 60000);
-  assert.equal(f.telegram.pairingLink(), null); assert.equal(f.telegram.handleUpdate(f.update(100, '/start ' + old)), null);
-  f.telegram.newPairing(); assert.equal(f.telegram.handleUpdate(f.update(100, '/start ' + old)), null);
+  assert.equal(f.telegram.pairingLink(), null); assert.equal(f.telegram.handleUpdate(f.update(100, '/start ' + old)).study, true);assert.equal(f.telegram.target,'');
+  f.telegram.newPairing(); assert.equal(f.telegram.handleUpdate(f.update(100, '/start ' + old)).study, true);assert.equal(f.telegram.target,'');
 });
 
 test('an expected phone requires the sender own contact and rejects the administrative account', async t => {
@@ -86,13 +89,64 @@ test('study replies reference the incoming message without altering screenshot f
   assert.deepEqual(f.calls.find(c=>c.method==='sendMessage').body.reply_parameters,{message_id:123,allow_sending_without_reply:true});
 });
 
-test('only plain text from the bound private recipient reaches the study handler',async t=>{
+test('plain text from any private sender reaches the study handler without a phone or start command',async t=>{
   const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');const received=[];f.telegram.onText=message=>received.push(message);
-  for(const update of [f.update(200,'SIRS'),f.update(100,'SIRS','group'),f.update(100,'/status'),f.update(100,'/unknown'),f.update(100,'  ')]) f.telegram.handleUpdate(update);
+  for(const update of [f.update(100,'SIRS','group'),f.update(100,'/status'),f.update(100,'/unknown'),f.update(100,'  ')]) f.telegram.handleUpdate(update);
   assert.equal(received.length,0);
   const update=f.update(100,'  SIRS  ');update.message.message_id=25;
   assert.equal(f.telegram.handleUpdate(update),null);
   assert.deepEqual(received,[{updateId:10,chatId:'100',messageId:25,text:'SIRS'}]);
+  const other=f.update(200,'Asma');other.message.message_id=26;
+  f.telegram.handleUpdate(other);
+  assert.deepEqual(received[1],{updateId:10,chatId:'200',messageId:26,text:'Asma'});
+  assert.equal(f.telegram.target,'100');
+});
+
+test('public study messages stay in their originating chat and cannot receive Drive deliveries',async t=>{
+  const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
+  const study=new StudyWorker({ledger:f.ledger,canReply:chat=>f.telegram.canStudy(chat),isReady:()=>f.telegram.connected,answer:async topic=>'Tema: '+topic,send:(...args)=>f.telegram.sendStudy(...args)});
+  f.telegram.onText=message=>study.enqueue(message);
+  for(const [id,topic] of [[200,'SIRS'],[300,'DPOC']]) {
+    const update=f.update(id,topic);update.update_id=id;update.message.message_id=id+1;
+    f.telegram.handleUpdate(update);f.telegram.handleUpdate(update);
+  }
+  await study.tick();
+  const sent=f.calls.filter(c=>c.method==='sendMessage').map(c=>c.body);
+  assert.deepEqual(sent.map(m=>[m.chat_id,m.text,m.reply_parameters.message_id]),[['200','Tema: SIRS',201],['300','Tema: DPOC',301]]);
+  assert.equal(study.status().counts.sent,2);assert.equal(f.telegram.target,'100');
+  await assert.rejects(f.telegram.send('200','Print privado'),/não autorizada/);
+  await assert.rejects(f.telegram.sendStudy('999','Não solicitada'),/não autorizada/);
+  await assert.rejects(f.telegram.sendStudy('-100','Grupo'),/não autorizada/);
+  const restored=new Telegram({ledger:f.ledger,token:f.telegram.token});assert.equal(restored.canStudy('200'),true);
+});
+
+test('public study works before Drive pairing and rejects spoofed senders and groups',async t=>{
+  const f=fixture(t);await f.telegram.validate();
+  const spoof=f.update(400,'SIRS');spoof.message.from.id=401;
+  const bot=f.update(500,'SIRS');bot.message.from.is_bot=true;
+  for(const update of [spoof,bot,f.update(-600,'SIRS','supergroup')]) assert.equal(f.telegram.handleUpdate(update),null);
+  assert.equal(f.telegram.canStudy('400'),false);assert.equal(f.telegram.canStudy('500'),false);
+  const reply=f.telegram.handleUpdate(f.update(200,'/start'));
+  assert.equal(reply.chat,'200');assert.equal(reply.study,true);assert.equal(reply.text.includes('Prints medicina'),false);
+  await f.telegram.sendStudy(reply.chat,reply.text);
+  assert.equal(f.telegram.connected,true);assert.equal(f.telegram.ready,false);assert.equal(f.telegram.target,'');
+  assert.equal(f.calls.find(c=>c.method==='sendMessage').body.chat_id,'200');
+});
+
+test('polling sends public greetings to the sender and one blocked user does not disable others',async t=>{
+  const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
+  let polls=0;const normal=f.telegram.fetchImpl;
+  f.telegram.fetchImpl=async(url,options)=>{
+    if(url.endsWith('getUpdates')) {
+      if(++polls===1)return {ok:true,json:async()=>({ok:true,result:[f.update(200,'/start'),{...f.update(300,'/start'),update_id:11}]})};
+      f.telegram.controller.abort();throw new Error('stopped');
+    }
+    if(url.endsWith('sendMessage') && JSON.parse(options.body).chat_id==='200') return {ok:false,status:403,json:async()=>({ok:false,error_code:403})};
+    return normal(url,options);
+  };
+  f.telegram.start();await f.telegram.task;
+  assert.deepEqual(f.calls.filter(c=>c.method==='sendMessage').map(c=>c.body.chat_id),['300']);
+  assert.equal(f.telegram.error,null);assert.equal(f.telegram.target,'100');
 });
 
 test('incoming study text is committed before acknowledging its Telegram offset',async t=>{
