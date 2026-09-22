@@ -27,8 +27,9 @@ const storageReady=!process.env.RAILWAY_SERVICE_ID || Boolean(process.env.RAILWA
 const telegramPath=path.join(dataDir,'telegram.json');
 const expectedPhone=String(process.env.TARGET_TELEGRAM_NUMBER || process.env.TARGET_WHATSAPP_NUMBER || '').replace(/\D/g,'');
 if(expectedPhone && !/^\d{10,15}$/.test(expectedPhone)) throw new Error('Número de destino inválido.');
+const allowedPhones=String(process.env.TELEGRAM_ALLOWED_PHONES || expectedPhone).split(',').map(p=>p.trim()).filter(Boolean);
 const telegramConfig=fs.existsSync(telegramPath)?JSON.parse(fs.readFileSync(telegramPath,'utf8')):{};
-let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger,expectedPhone});
+let telegram=new Telegram({token:process.env.TELEGRAM_BOT_TOKEN || telegramConfig.token,ledger,expectedPhone,allowedPhones});
 let stopping=false,configuringTelegram=false;
 const study=new StudyWorker({ledger,answer:createStudyTutor({apiKey:process.env.GEMINI_API_KEY,model}),send:(...args)=>telegram.sendStudy(...args),canReply:chat=>telegram.canStudy(chat),isReady:()=>telegram.connected && storageReady && !stopping});
 const receiveText=message=>{study.enqueue(message);};
@@ -63,7 +64,7 @@ app.post('/api/telegram-token',async(req,res)=>{
   if(telegram.configured) return res.status(409).json({error:'Um bot já está configurado. Use a conexão existente.'});
   if(configuringTelegram || worker.busy) return res.status(409).json({error:'Aguarde a verificação em andamento e tente novamente.'});
   configuringTelegram=true;
-  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger,expectedPhone,onText:receiveText});
+  const candidate=new Telegram({token:String(req.body.token || '').trim(),ledger,expectedPhone,allowedPhones,onText:receiveText});
   try {
     await candidate.validate();
     await telegram.stop();

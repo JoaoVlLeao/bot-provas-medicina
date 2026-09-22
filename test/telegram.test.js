@@ -10,7 +10,8 @@ function fixture(t) {
   let clock = 1000000;
   const calls = [], waits = [];
   const token = '123456789:' + 'X'.repeat(35);
-  const telegram = new Telegram({token, ledger, now: () => clock,
+  const allowedPhones=['5511999999999','5511888888888','5511777777777'];
+  const telegram = new Telegram({token, ledger, allowedPhones, now: () => clock,
     wait: async ms => { waits.push(ms); clock += ms; },
     fetchImpl: async (url, options) => {
       const method = url.split('/').at(-1), body = JSON.parse(options.body); calls.push({method, body});
@@ -18,6 +19,7 @@ function fixture(t) {
         : method === 'getWebhookInfo' ? { url: '' } : { message_id: calls.length, chat: {id: Number(body.chat_id)} };
       return {ok: true, status: 200, json: async () => ({ok: true, result})};
     }});
+  for(const [i,id] of [100,200,300].entries()) ledger.db.prepare('INSERT INTO telegram_authorized_chats VALUES (?,?)').run(String(id),allowedPhones[i]);
   const update = (id, text, type = 'private') => ({update_id: 10, message: {chat: {id, type}, from: {id, first_name: 'Pessoa'}, text}});
   return {ledger, telegram, calls, waits, update, advance: ms => clock += ms};
 }
@@ -89,7 +91,7 @@ test('study replies reference the incoming message without altering screenshot f
   assert.deepEqual(f.calls.find(c=>c.method==='sendMessage').body.reply_parameters,{message_id:123,allow_sending_without_reply:true});
 });
 
-test('plain text from any private sender reaches the study handler without a phone or start command',async t=>{
+test('plain text from verified authorized senders reaches the study handler',async t=>{
   const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');const received=[];f.telegram.onText=message=>received.push(message);
   for(const update of [f.update(100,'SIRS','group'),f.update(100,'/status'),f.update(100,'/unknown'),f.update(100,'  ')]) f.telegram.handleUpdate(update);
   assert.equal(received.length,0);
@@ -102,7 +104,7 @@ test('plain text from any private sender reaches the study handler without a pho
   assert.equal(f.telegram.target,'100');
 });
 
-test('public study messages stay in their originating chat and cannot receive Drive deliveries',async t=>{
+test('authorized study messages stay in their originating chat and cannot receive Drive deliveries',async t=>{
   const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
   const study=new StudyWorker({ledger:f.ledger,canReply:chat=>f.telegram.canStudy(chat),isReady:()=>f.telegram.connected,answer:async topic=>'Tema: '+topic,send:(...args)=>f.telegram.sendStudy(...args)});
   f.telegram.onText=message=>study.enqueue(message);
@@ -117,10 +119,10 @@ test('public study messages stay in their originating chat and cannot receive Dr
   await assert.rejects(f.telegram.send('200','Print privado'),/não autorizada/);
   await assert.rejects(f.telegram.sendStudy('999','Não solicitada'),/não autorizada/);
   await assert.rejects(f.telegram.sendStudy('-100','Grupo'),/não autorizada/);
-  const restored=new Telegram({ledger:f.ledger,token:f.telegram.token});assert.equal(restored.canStudy('200'),true);
+  const restored=new Telegram({ledger:f.ledger,token:f.telegram.token,allowedPhones:[...f.telegram.allowedPhones]});assert.equal(restored.canStudy('200'),true);
 });
 
-test('public study works before Drive pairing and rejects spoofed senders and groups',async t=>{
+test('authorized study works before Drive pairing and rejects spoofed senders and groups',async t=>{
   const f=fixture(t);await f.telegram.validate();
   const spoof=f.update(400,'SIRS');spoof.message.from.id=401;
   const bot=f.update(500,'SIRS');bot.message.from.is_bot=true;
@@ -133,7 +135,7 @@ test('public study works before Drive pairing and rejects spoofed senders and gr
   assert.equal(f.calls.find(c=>c.method==='sendMessage').body.chat_id,'200');
 });
 
-test('polling sends public greetings to the sender and one blocked user does not disable others',async t=>{
+test('polling sends authorized greetings to the sender and one blocked user does not disable others',async t=>{
   const f=fixture(t);await f.telegram.validate();f.ledger.set('telegram_chat_id','100');
   let polls=0;const normal=f.telegram.fetchImpl;
   f.telegram.fetchImpl=async(url,options)=>{
@@ -202,4 +204,34 @@ test('polling persists binding and offset before the confirmation; a new instanc
   assert.equal(f.calls.filter(c => c.method === 'sendMessage').length, 1);
   assert.equal(JSON.stringify(f.telegram.publicStatus()).includes(f.telegram.token), false);
   assert.equal(safeError(new Error(f.telegram.token)).includes(f.telegram.token), false);
+});
+
+ test('restriction ignores historical public chats, forged contacts, other numbers and queued messages',async t=>{
+  const f=fixture(t);await f.telegram.validate();
+  f.ledger.db.prepare('INSERT INTO telegram_private_chats VALUES (?,?)').run('900',1);
+  const received=[];f.telegram.onText=m=>received.push(m);
+  assert.equal(f.telegram.canStudy('900'),false);
+  assert.equal(f.telegram.handleUpdate(f.update(900,'SIRS')),null);
+  assert.equal(f.telegram.handleUpdate(f.update(900,'/help')),null);
+  assert.equal(f.telegram.handleUpdate(f.update(900,'/start')).contact,true);
+  for(const contact of [{user_id:100,phone_number:'5511999999999'},{user_id:900,phone_number:'5511666666666'}]) {
+    const u=f.update(900,'');u.message.contact=contact;assert.equal(f.telegram.handleUpdate(u),null);
+  }
+  assert.equal(received.length,0);assert.equal(f.telegram.canStudy('900'),false);
+  await assert.rejects(f.telegram.sendStudy('900','denied'),/não autorizada/);
+  const study=new StudyWorker({ledger:f.ledger,canReply:c=>f.telegram.canStudy(c),isReady:()=>f.telegram.connected,answer:async()=>{throw Error('must not analyze');},send:async()=>{throw Error('must not send');}});
+  f.ledger.db.prepare("INSERT INTO study_messages(update_id,chat_id,source_message_id,topic,status,updated) VALUES (999,'900',1,'old','queued',1)").run();
+  await study.tick();assert.equal(study.status().counts.failed,1);
+});
+
+test('own contact authorizes only listed phones, persists, and is revoked when list changes',async t=>{
+  const f=fixture(t);await f.telegram.validate();
+  const u=f.update(900,'');u.message.contact={user_id:900,phone_number:'+55 (11) 99999-9999'};
+  u.message.forward_origin={type:'user'};assert.equal(f.telegram.handleUpdate(u),null);
+  delete u.message.forward_origin;f.telegram.handleUpdate(u);assert.equal(f.telegram.canStudy('900'),true);
+  assert.equal(f.telegram.canStudy('100'),false);
+  const restored=new Telegram({ledger:f.ledger,allowedPhones:['5511999999999']});assert.equal(restored.canStudy('900'),true);
+  const revoked=new Telegram({ledger:f.ledger,allowedPhones:[]});assert.equal(revoked.canStudy('900'),false);
+  f.ledger.set('telegram_chat_id','800');f.ledger.set('telegram_verified_phone','5511999999999');
+  assert.equal(restored.canStudy('800'),true);assert.equal(revoked.canStudy('800'),false);
 });
